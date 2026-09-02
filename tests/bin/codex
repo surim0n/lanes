@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Fake codex for tests. Behaviour via FAKE_CODEX_MODE=write|noop|fail|slow.
+set -u
+case "${1:-}" in
+  --version) echo "codex-cli 0.0.0-fake"; exit 0 ;;
+  login)
+    if [ "${FAKE_CODEX_LOGGED_OUT:-0}" = 1 ]; then echo "Not logged in"; exit 1; fi
+    echo "Logged in using ChatGPT"; exit 0 ;;
+  exec) shift ;;
+  *) echo "fake codex: unsupported: $*" >&2; exit 2 ;;
+esac
+[ -n "${FAKE_CODEX_ARGS:-}" ] && printf '%s\n' "$@" > "$FAKE_CODEX_ARGS"
+dir="$PWD"; final=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --cd|-C) dir="$2"; shift ;;
+    --output-last-message|-o) final="$2"; shift ;;
+  esac
+  shift
+done
+prompt="$(cat)"
+[ -n "${FAKE_CODEX_PROMPT:-}" ] && printf '%s' "$prompt" > "$FAKE_CODEX_PROMPT"
+[ -n "${FAKE_CODEX_LS:-}" ] && ls -A "$dir" > "$FAKE_CODEX_LS"
+case "${FAKE_CODEX_MODE:-write}" in
+  write) printf 'hello\n' > "$dir/${FAKE_CODEX_FILE:-lane-output.txt}"; msg="Wrote ${FAKE_CODEX_FILE:-lane-output.txt}. VERIFY output: ok" ;;
+  noop)  msg="I made no changes: the spec conflicts with a project rule." ;;
+  fail)  echo "fake codex: boom" >&2; exit 1 ;;
+  slow)  sleep "${FAKE_CODEX_SLEEP:-5}"; msg="late" ;;
+esac
+[ -n "$final" ] && printf '%s\n' "$msg" > "$final"
+echo "$msg"

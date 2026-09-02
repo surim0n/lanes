@@ -1,0 +1,21 @@
+{
+  "name": "lanes",
+  "version": "0.1.0",
+  "description": "Architect mode for Claude Code: the session designs, specs and judges; Codex lanes do the typing at a chosen reasoning effort; a clean-context reviewer gates done. Enforced by hooks and one script, not by prompts.",
+  "author": {
+    "name": "Saurabh Suri",
+    "url": "https://github.com/surim0n"
+  },
+  "license": "MIT",
+  "keywords": [
+    "orchestration",
+    "model-routing",
+    "codex",
+    "architect",
+    "review-gate",
+    "hooks",
+    "reasoning-effort"
+  ],
+  "homepage": "https://github.com/surim0n/lanes",
+  "repository": "https://github.com/surim0n/lanes"
+}

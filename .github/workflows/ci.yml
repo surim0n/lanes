@@ -1,0 +1,44 @@
+name: ci
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: deps
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck jq
+          else brew install shellcheck jq >/dev/null; fi
+      - name: shellcheck
+        run: shellcheck -x bin/lanes tests/run.sh tests/bin/codex tests/lint-frontmatter.sh
+      - name: json
+        run: for f in .claude-plugin/*.json hooks/hooks.json; do jq empty "$f"; done
+      - name: frontmatter
+        run: tests/lint-frontmatter.sh
+      - name: tests (system bash)
+        run: /bin/bash tests/run.sh
+
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm i -g @anthropic-ai/claude-code
+      - run: claude plugin validate . --strict
+
+  links:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: lycheeverse/lychee-action@v2
+        with:
+          args: --no-progress README.md agents commands skills
+          fail: true

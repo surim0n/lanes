@@ -1,0 +1,18 @@
+{
+  "name": "lanes",
+  "owner": {
+    "name": "Saurabh Suri",
+    "url": "https://github.com/surim0n"
+  },
+  "metadata": {
+    "description": "Architect mode for Claude Code: Codex implementation lanes, a clean-context reviewer, and a hook-enforced review gate."
+  },
+  "plugins": [
+    {
+      "name": "lanes",
+      "source": "./",
+      "version": "0.1.0",
+      "description": "Architect mode for Claude Code: the session designs, specs and judges; Codex lanes do the typing at a chosen reasoning effort; a clean-context reviewer gates done."
+    }
+  ]
+}

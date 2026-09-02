@@ -1,0 +1,606 @@
+#!/usr/bin/env bash
+# lanes — deterministic implementation lanes for Claude Code.
+#
+#   lanes run <routine|escalate> --effort <rung> [options] [SPEC|-]
+#   lanes doctor | status | mode on|off|status | reviewed [--verdict ship|fix|rethink]
+#   lanes tree-hash | spec-template | help
+#   lanes hook <pre-edit|bash|stop|session-start>      (called from hooks.json)
+#
+# `run` exit codes: 0 complete · 1 verify failed · 2 empty diff · 3 timeout
+#                   4 codex unavailable · 5 usage / spec error · 6 codex error
+set -euo pipefail
+
+LANES_VERSION="0.1.0"
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+PLUGIN_ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
+
+EX_OK=0 EX_VERIFY=1 EX_EMPTY=2 EX_TIMEOUT=3 EX_UNAVAILABLE=4 EX_USAGE=5 EX_ERROR=6
+
+say()  { printf '%s\n' "$*"; }
+warn() { printf 'lanes: warning: %s\n' "$*" >&2; }
+die()  { printf 'lanes: %s\n' "$1" >&2; exit "${2:-$EX_USAGE}"; }
+
+# ---------------------------------------------------------------- config ----
+
+conf_files() {
+  [ -f "$PLUGIN_ROOT/lanes.conf" ] && say "$PLUGIN_ROOT/lanes.conf"
+  local root
+  if root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+    [ -f "$root/.claude/lanes.conf" ] && say "$root/.claude/lanes.conf"
+  fi
+  [ -n "${LANES_CONF:-}" ] && [ -f "$LANES_CONF" ] && say "$LANES_CONF"
+  return 0
+}
+
+# conf_get routine.model → value; later files win, env LANES_ROUTINE_MODEL wins over all.
+conf_get() {
+  local key="$1" val="" f v envkey
+  while IFS= read -r f; do
+    v="$(sed -n -E "s/^[[:space:]]*${key//./\\.}[[:space:]]*=[[:space:]]*//p" "$f" \
+        | tail -n 1 | sed -E 's/[[:space:]]+#.*$//; s/[[:space:]]+$//')"
+    [ -n "$v" ] && val="$v"
+  done < <(conf_files)
+  envkey="LANES_$(printf '%s' "$key" | tr '.a-z' '_A-Z')"
+  [ -n "${!envkey:-}" ] && val="${!envkey}"
+  printf '%s' "$val"
+}
+
+# ------------------------------------------------------------------- git ----
+
+# Content hash of the working tree (tracked + untracked, .gitignore respected),
+# computed through a throwaway index so the real index is never touched.
+tree_hash() {
+  ( cd "${1:-.}" || exit 1
+    idx="$(git rev-parse --git-path index)"
+    tmp="$(mktemp -t lanes-index.XXXXXX)"
+    [ -f "$idx" ] && cp "$idx" "$tmp"
+    GIT_INDEX_FILE="$tmp" git add -A >/dev/null 2>&1 || :
+    GIT_INDEX_FILE="$tmp" git write-tree
+    rm -f "$tmp" )
+}
+
+# State lives in the checkout's git dir: nothing to gitignore, nothing to commit.
+state_dir() {
+  local gd
+  gd="$(cd "${1:-.}" 2>/dev/null && git rev-parse --git-dir 2>/dev/null)" || return 1
+  gd="$(cd "${1:-.}" && cd "$gd" && pwd)"
+  mkdir -p "$gd/lanes"
+  printf '%s' "$gd/lanes"
+}
+
+# ---------------------------------------------------------------- timeout ----
+
+timeout_backend() {
+  if command -v timeout >/dev/null 2>&1; then say timeout
+  elif command -v gtimeout >/dev/null 2>&1; then say gtimeout
+  elif command -v perl >/dev/null 2>&1; then say perl
+  else say none; fi
+}
+
+# run_timeout SECS cmd… — exit 124 on timeout whatever the backend.
+run_timeout() {
+  local secs="$1" rc=0; shift
+  if [ "$secs" -le 0 ]; then "$@"; return; fi
+  case "$(timeout_backend)" in
+    timeout)  timeout  "$secs" "$@" || rc=$? ;;
+    gtimeout) gtimeout "$secs" "$@" || rc=$? ;;
+    perl)     perl -e 'alarm shift; exec @ARGV' "$secs" "$@" || rc=$? ;;
+    none)     warn "no timeout backend (timeout/gtimeout/perl); running uncapped"; "$@" || rc=$? ;;
+  esac
+  [ "$rc" = 142 ] && rc=124
+  return "$rc"
+}
+
+# ------------------------------------------------------------------ spec ----
+
+SECTIONS="OBJECTIVE FILES INTERFACES CONSTRAINTS VERIFY"
+
+# spec_section FILE NAME — body of a section. Headers are a keyword at line
+# start, optionally prefixed with markdown #s, followed by ':' or end of line.
+spec_section() {
+  awk -v want="$2" '
+    {
+      u = toupper($0)
+      if (match(u, /^[ \t]*(#+[ \t]*)?(OBJECTIVE|FILES|INTERFACES|CONSTRAINTS|VERIFY)[ \t]*(:|$)/)) {
+        kw = substr(u, RSTART, RLENGTH); gsub(/[^A-Z]/, "", kw); cur = kw
+        rest = substr($0, RSTART + RLENGTH); sub(/^[ \t]+/, "", rest); sub(/[ \t]+$/, "", rest)
+        if (rest != "") body[cur] = body[cur] rest "\n"
+        next
+      }
+      if (cur != "") body[cur] = body[cur] $0 "\n"
+    }
+    END { printf "%s", body[want] }
+  ' "$1"
+}
+
+nonblank() { printf '%s' "$1" | tr -d '[:space:]' | grep -q . ; }
+
+spec_template() {
+  cat <<'TPL'
+OBJECTIVE:
+One paragraph. What to build or change, and what "done" looks like.
+
+FILES:
+path/to/file.ts        (modify)
+path/to/new-file.ts    (create)
+
+INTERFACES:
+Signatures, types, or API shapes the code must match. Exact.
+
+CONSTRAINTS:
+Project conventions. Things not to touch. Behaviour that must not change.
+
+VERIFY:
+npm test -- path/to/file
+TPL
+}
+
+# ------------------------------------------------------------------- run ----
+
+usage_run() {
+  cat <<'U'
+usage: lanes run <routine|escalate> --effort <rung> [options] [SPEC|-]
+
+  SPEC            spec file (default: stdin). Sections: OBJECTIVE, FILES, INTERFACES,
+                  CONSTRAINTS, VERIFY. OBJECTIVE, FILES and VERIFY are required.
+  --effort, -e    reasoning effort; rungs come from lanes.conf (routine.efforts …)
+  --model, -m     override the lane's model slug for this run
+  --timeout, -t   wall clock for codex in seconds (lanes.conf <lane>.timeout)
+  --verify-timeout  wall clock for the VERIFY re-run (lanes.conf verify.timeout)
+  --worktree, -w  run in a throwaway git worktree; emit a patch instead of editing
+                  the working tree. Use for parallel lanes or racing two lanes.
+  --network       let the sandbox reach the network (package installs)
+  --keep-session  persist the codex session (default: --ephemeral)
+  --dry-run       resolve everything, print the plan and the prompt path, run nothing
+
+exit: 0 complete · 1 verify failed · 2 empty diff · 3 timeout · 4 codex unavailable
+      5 usage/spec error · 6 codex error
+U
+}
+
+cmd_run() {
+  local lane="" effort="" model="" timeout="" vtimeout="" spec_src=""
+  local worktree=0 dry=0 network=0 keep=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      routine|escalate) [ -z "$lane" ] || die "lane given twice"; lane="$1" ;;
+      --effort|-e)      effort="${2:-}"; shift ;;
+      --model|-m)       model="${2:-}"; shift ;;
+      --timeout|-t)     timeout="${2:-}"; shift ;;
+      --verify-timeout) vtimeout="${2:-}"; shift ;;
+      --worktree|-w)    worktree=1 ;;
+      --network)        network=1 ;;
+      --keep-session)   keep=1 ;;
+      --dry-run)        dry=1 ;;
+      -h|--help)        usage_run; return 0 ;;
+      -)                spec_src="-" ;;
+      -*)               die "unknown option: $1 (see lanes run --help)" ;;
+      *)                [ -z "$spec_src" ] || die "spec given twice"; spec_src="$1" ;;
+    esac
+    shift
+  done
+  [ -n "$lane" ] || die "usage: lanes run <routine|escalate> --effort <rung> [SPEC|-]"
+
+  # --- resolve lane settings
+  local efforts
+  efforts="$(conf_get "$lane.efforts")"
+  [ -n "$efforts" ] || die "no efforts configured for lane '$lane' (lanes.conf)"
+  [ -n "$effort" ] || die "--effort is required for the $lane lane; rungs: $efforts"
+  case " $efforts " in
+    *" $effort "*) ;;
+    *) die "effort '$effort' is not a rung of the $lane lane (rungs: $efforts). Escalate instead of rounding." ;;
+  esac
+  [ -n "$model" ]    || model="$(conf_get "$lane.model")"
+  [ -n "$model" ]    || die "no model configured for lane '$lane' (lanes.conf)"
+  [ -n "$timeout" ]  || timeout="$(conf_get "$lane.timeout")"
+  [ -n "$timeout" ]  || timeout=600
+  [ -n "$vtimeout" ] || vtimeout="$(conf_get verify.timeout)"
+  [ -n "$vtimeout" ] || vtimeout=600
+
+  # --- repo
+  local root rel
+  root="$(git rev-parse --show-toplevel 2>/dev/null)" || die "lanes run needs a git repository (that is how it detects what the lane changed)"
+  rel="$(git rev-parse --show-prefix)"
+
+  # --- run dir + spec
+  local rundir
+  rundir="${LANES_RUN_DIR:-${TMPDIR:-/tmp}/lanes}/$(date +%Y%m%d-%H%M%S)-$lane-$$"
+  mkdir -p "$rundir"
+  local spec="$rundir/spec.md"
+  if [ -z "$spec_src" ] || [ "$spec_src" = "-" ]; then
+    [ -t 0 ] && die "no spec: pass a file or pipe one on stdin (lanes spec-template)"
+    cat > "$spec"
+  else
+    [ -f "$spec_src" ] || die "spec file not found: $spec_src"
+    cp "$spec_src" "$spec"
+  fi
+  local s missing=""
+  for s in OBJECTIVE FILES VERIFY; do
+    nonblank "$(spec_section "$spec" "$s")" || missing="$missing $s"
+  done
+  [ -z "$missing" ] || die "spec is missing required section(s):$missing — a spec you can't finish is a decision you haven't made (lanes spec-template)"
+  for s in INTERFACES CONSTRAINTS; do
+    nonblank "$(spec_section "$spec" "$s")" || warn "spec has no $s section"
+  done
+  local verify_cmd
+  verify_cmd="$(spec_section "$spec" VERIFY)"
+
+  # --- prompt: the spec verbatim plus a fixed trailer
+  local prompt="$rundir/prompt.md" final="$rundir/final.md" log="$rundir/codex.log"
+  {
+    cat "$spec"
+    cat <<'TRAILER'
+
+---
+Lane instructions:
+- Make the changes described above. Touch only the files listed under FILES unless the objective cannot be met otherwise; if you must touch others, name them and say why in your final message.
+- Do not create commits. Leave the changes in the working tree.
+- When finished, run the VERIFY command exactly as written and include its complete output in your final message.
+- If the spec cannot be satisfied as written, make no changes and explain precisely what is missing or wrong.
+TRAILER
+  } > "$prompt"
+
+  # --- codex command
+  local cmd=(codex exec --model "$model" -c "model_reasoning_effort=\"$effort\"" -c 'approval_policy="never"'
+             --sandbox workspace-write --skip-git-repo-check --output-last-message "$final" --color never)
+  [ "$network" = 1 ] && cmd+=(-c 'sandbox_workspace_write.network_access=true')
+  [ "$keep" = 1 ]    || cmd+=(--ephemeral)
+
+  if [ "$dry" = 1 ]; then
+    say "DRY RUN · $lane · $model · effort $effort · timeout ${timeout}s · verify timeout ${vtimeout}s · worktree=$worktree"
+    say "prompt: $prompt"
+    say "verify: $(printf '%s' "$verify_cmd" | head -n 3 | tr '\n' ' ')"
+    say "codex:  ${cmd[*]} --cd <work> - < $prompt"
+    return 0
+  fi
+
+  # --- preflight: fail loudly, never substitute
+  command -v codex >/dev/null 2>&1 || die "codex CLI not found on PATH (npm i -g @openai/codex && codex login)" "$EX_UNAVAILABLE"
+  local login
+  if ! login="$(codex login status 2>&1)" || printf '%s' "$login" | grep -qi 'not logged in'; then
+    die "codex is not logged in: ${login:-no output} (run: codex login)" "$EX_UNAVAILABLE"
+  fi
+
+  # --- working tree: in place, or a throwaway worktree seeded with the current tree
+  local before work wt=""
+  before="$(tree_hash "$root")"
+  if [ "$worktree" = 1 ]; then
+    git rev-parse --verify HEAD >/dev/null 2>&1 || die "--worktree needs at least one commit"
+    wt="$(mktemp -d -t lanes-wt.XXXXXX)"
+    git -C "$root" worktree add --detach --quiet "$wt" HEAD
+    git -C "$wt" read-tree -u --reset "$before"
+    work="$wt/$rel"
+    # shellcheck disable=SC2064
+    trap "git -C '$root' worktree remove --force '$wt' >/dev/null 2>&1; git -C '$root' worktree prune >/dev/null 2>&1" EXIT
+  else
+    work="$PWD"
+  fi
+  local tree_root="${wt:-$root}"
+
+  # --- run
+  local rc=0 status="" dur
+  SECONDS=0
+  run_timeout "$timeout" "${cmd[@]}" --cd "$work" - < "$prompt" > "$log" 2>&1 || rc=$?
+  dur=$SECONDS
+
+  if [ "$rc" = 124 ]; then
+    status=timeout
+  elif [ "$rc" != 0 ]; then
+    if grep -qiE 'not logged in|unauthori[sz]ed|401|login' "$log"; then status=unavailable
+    elif grep -qiE 'model.*(not found|unsupported|unavailable|does not exist|invalid)' "$log"; then status=unavailable
+    else status=error; fi
+  fi
+
+  # --- what changed (exact lane delta: tree before vs tree after)
+  local after changed=0 patch="$rundir/changes.patch" names stat
+  after="$(tree_hash "$tree_root")"
+  if [ "$after" != "$before" ]; then
+    changed=1
+    git -C "$tree_root" diff-tree -r -p --binary "$before" "$after" > "$patch"
+    names="$(git -C "$tree_root" diff-tree -r --name-status "$before" "$after")"
+    stat="$(git -C "$tree_root" diff-tree -r --shortstat "$before" "$after" | sed -E 's/^[[:space:]]+//')"
+  fi
+  if [ -z "$status" ]; then
+    [ "$changed" = 1 ] || status=empty-diff
+  fi
+
+  # --- re-run VERIFY ourselves; codex's word is not evidence
+  local vrc="" vlog="$rundir/verify.log"
+  if [ -z "$status" ]; then
+    vrc=0
+    ( cd "$work" && run_timeout "$vtimeout" bash -c "$verify_cmd" ) > "$vlog" 2>&1 || vrc=$?
+    if [ "$vrc" = 0 ]; then status=complete; else status=verify-failed; fi
+  fi
+
+  # --- report
+  local report="$rundir/report.txt"
+  {
+    say "LANE REPORT · $lane · $model · effort $effort · $((dur / 60))m$((dur % 60))s · $status"
+    case "$status" in
+      timeout)     say "codex hit the ${timeout}s wall clock; whatever landed is listed below (log: $log)" ;;
+      unavailable) say "codex could not run: $(tail -n 3 "$log" | tr '\n' ' ')" ;;
+      error)       say "codex exited $rc (log: $log): $(tail -n 3 "$log" | tr '\n' ' ')" ;;
+      empty-diff)  say "codex exited 0 but changed nothing. Its final message usually says why:" ;;
+    esac
+    if [ "$changed" = 1 ]; then
+      say "changes ($stat):"
+      printf '%s\n' "$names" | sed 's/^/  /'
+      [ "$worktree" = 1 ] && say "patch: $patch  (apply with: git apply --3way \"$patch\")"
+    else
+      say "changes: none"
+    fi
+    if [ -n "$vrc" ]; then
+      say "verify: exit $vrc · $(printf '%s' "$verify_cmd" | head -n 1)"
+      tail -n 12 "$vlog" | awk '{ print "    " substr($0, 1, 200) }'
+      [ "$vrc" = 124 ] && say "    (verify hit the ${vtimeout}s wall clock)"
+    fi
+    if [ -s "$final" ]; then
+      say "codex said (last lines; full text: $final):"
+      tail -n 6 "$final" | awk '{ print "    " substr($0, 1, 200) }'
+    fi
+    say "artifacts: $rundir"
+    case "$status" in
+      verify-failed) say "next: read $vlog; send the lane a corrected spec rather than patching by hand" ;;
+      empty-diff)    say "next: fix the spec (or the constraint it collided with) and rerun; do not implement it yourself" ;;
+      timeout)       say "next: split the task, or rerun with --timeout; escalate only if judgment was the problem" ;;
+    esac
+  } | tee "$report"
+
+  case "$status" in
+    complete)      return "$EX_OK" ;;
+    verify-failed) return "$EX_VERIFY" ;;
+    empty-diff)    return "$EX_EMPTY" ;;
+    timeout)       return "$EX_TIMEOUT" ;;
+    unavailable)   return "$EX_UNAVAILABLE" ;;
+    *)             return "$EX_ERROR" ;;
+  esac
+}
+
+# --------------------------------------------------------- mode / reviewed ----
+
+cmd_mode() {
+  local sd
+  sd="$(state_dir)" || die "not a git repository (lanes keeps its state in .git/lanes)"
+  case "${1:-status}" in
+    on)
+      touch "$sd/architect"
+      tree_hash > "$sd/reviewed"
+      say "architect mode: on — Edit/Write are blocked, the review gate is armed (baseline: $(cut -c1-12 "$sd/reviewed"))" ;;
+    off)
+      rm -f "$sd/architect"
+      say "architect mode: off" ;;
+    status)
+      if [ -f "$sd/architect" ]; then say on; else say off; fi ;;
+    *) die "usage: lanes mode on|off|status" ;;
+  esac
+}
+
+cmd_reviewed() {
+  local verdict=ship sd h
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --verdict) verdict="${2:-}"; shift ;;
+      ship|fix|rethink) verdict="$1" ;;
+      *) die "usage: lanes reviewed [--verdict ship|fix|rethink]" ;;
+    esac
+    shift
+  done
+  case "$verdict" in ship|fix|rethink) ;; *) die "verdict must be ship, fix or rethink" ;; esac
+  sd="$(state_dir)" || die "not a git repository"
+  h="$(tree_hash)"
+  printf '%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$h" "$verdict" >> "$sd/reviews.log"
+  if [ "$verdict" = ship ]; then
+    printf '%s\n' "$h" > "$sd/reviewed"
+    say "recorded: tree ${h:0:12} → ship (gate clear)"
+  else
+    say "recorded: tree ${h:0:12} → $verdict (gate stays armed until a ship verdict)"
+  fi
+}
+
+# ---------------------------------------------------------------- status ----
+
+gate_state() { # prints "clear" or "pending <n-files>"; empty if not applicable
+  local sd cur rev n
+  sd="$(state_dir "${1:-.}")" || return 0
+  [ -f "$sd/architect" ] || return 0
+  cur="$(tree_hash "${1:-.}")"
+  rev="$(cat "$sd/reviewed" 2>/dev/null || true)"
+  if [ "$cur" = "$rev" ]; then say clear; return 0; fi
+  n="$(git -C "${1:-.}" diff-tree -r --name-only "$rev" "$cur" 2>/dev/null | wc -l | tr -d ' ' || true)"
+  say "pending ${n:-?}"
+}
+
+cmd_status() {
+  local root sd mode gate last
+  say "lanes $LANES_VERSION · $PLUGIN_ROOT"
+  if root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+    say "repo: $root ($(git rev-parse --abbrev-ref HEAD 2>/dev/null || say 'no commits'))"
+    sd="$(state_dir)"
+    if [ -f "$sd/architect" ]; then mode=on; else mode=off; fi
+    say "architect mode: $mode"
+    if [ "$mode" = on ]; then
+      gate="$(gate_state)"
+      last="$(tail -n 1 "$sd/reviews.log" 2>/dev/null | cut -f1,3 | tr '\t' ' ' || true)"
+      case "$gate" in
+        clear)  say "gate: clear${last:+ (last verdict: $last)}" ;;
+        *)      say "gate: ${gate/pending /pending — } file(s) changed since the last ship verdict${last:+ (last verdict: $last)}" ;;
+      esac
+    fi
+  else
+    say "repo: not a git repository (architect mode and the gate need one)"
+  fi
+  say "routine:  $(conf_get routine.model) [$(conf_get routine.efforts)] $(conf_get routine.timeout)s"
+  say "escalate: $(conf_get escalate.model) [$(conf_get escalate.efforts)] $(conf_get escalate.timeout)s"
+  if command -v codex >/dev/null 2>&1; then
+    say "codex: $(codex --version 2>/dev/null | head -n 1) · $(codex login status 2>&1 | head -n 1)"
+  else
+    say "codex: not found on PATH"
+  fi
+}
+
+# ---------------------------------------------------------------- doctor ----
+
+cmd_doctor() {
+  local fails=0 f
+  ok()   { say "  ✓ $*"; }
+  bad()  { say "  ✗ $*"; fails=$((fails + 1)); }
+  note() { say "  · $*"; }
+
+  say "lanes doctor $LANES_VERSION"
+  say "codex"
+  if command -v codex >/dev/null 2>&1; then
+    ok "$(codex --version 2>/dev/null | head -n 1) at $(command -v codex)"
+    local login
+    if login="$(codex login status 2>&1)" && ! printf '%s' "$login" | grep -qi 'not logged in'; then
+      ok "$login"
+    else
+      bad "not logged in (${login:-no output}) — run: codex login"
+    fi
+  else
+    bad "codex not on PATH — npm i -g @openai/codex && codex login"
+  fi
+
+  say "tools"
+  ok "git $(git --version | awk '{print $3}')"
+  case "$(timeout_backend)" in
+    none) bad "no timeout backend — install coreutils (brew install coreutils) or perl" ;;
+    *)    ok "timeout via $(timeout_backend)" ;;
+  esac
+  if command -v jq >/dev/null 2>&1; then ok "jq (hook JSON parsing, model cross-check)"; else note "jq not found — hooks fall back to sed; model cross-check skipped"; fi
+
+  say "config"
+  while IFS= read -r f; do note "reads $f"; done < <(conf_files)
+  local lane slug efforts cache="${CODEX_HOME:-$HOME/.codex}/models_cache.json" known
+  for lane in routine escalate; do
+    slug="$(conf_get "$lane.model")"; efforts="$(conf_get "$lane.efforts")"
+    if [ -z "$slug" ] || [ -z "$efforts" ]; then bad "$lane lane: model or efforts missing"; continue; fi
+    if command -v jq >/dev/null 2>&1 && [ -f "$cache" ]; then
+      known="$(jq -r --arg s "$slug" '.. | objects | select(.slug? == $s) | ((.supported_reasoning_levels // .reasoning_levels // []) | map(.effort // .) | join(" "))' "$cache" 2>/dev/null | head -n 1 || true)"
+      if [ -z "$known" ]; then
+        bad "$lane lane: $slug is not in codex's cached model list ($cache) — stale slug?"
+      elif [ "$known" != "$efforts" ]; then
+        bad "$lane lane: $slug efforts in lanes.conf [$efforts] differ from codex's list [$known]"
+      else
+        ok "$lane lane: $slug [$efforts] $(conf_get "$lane.timeout")s"
+      fi
+    else
+      ok "$lane lane: $slug [$efforts] $(conf_get "$lane.timeout")s (not cross-checked)"
+    fi
+  done
+
+  say "state"
+  if git rev-parse --show-toplevel >/dev/null 2>&1; then
+    ok "git repo: $(git rev-parse --show-toplevel)"
+    note "architect mode: $(cmd_mode status)$( [ "$(cmd_mode status)" = on ] && printf ' · gate: %s' "$(gate_state)")"
+  else
+    note "not in a git repository — architect mode and the gate are unavailable here"
+  fi
+  note "hooks: $PLUGIN_ROOT/hooks/hooks.json"
+
+  [ "$fails" = 0 ] && { say "all clear"; return 0; }
+  say "$fails problem(s)"; return 1
+}
+
+# ----------------------------------------------------------------- hooks ----
+
+json_get() { # json key → string value (top-level or nested first match)
+  if command -v jq >/dev/null 2>&1; then
+    printf '%s' "$1" | jq -r --arg k "$2" '.. | objects | select(has($k)) | .[$k] | tostring' 2>/dev/null | head -n 1
+  else
+    printf '%s' "$1" | sed -n "s/.*\"$2\"[[:space:]]*:[[:space:]]*\"\{0,1\}\([^\",}]*\)\"\{0,1\}.*/\1/p" | head -n 1
+  fi
+}
+json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' '; }
+
+cmd_hook() {
+  trap 'exit 0' ERR   # hooks fail open: a bug here must never block the user
+  local ev="${1:-}" input dir sd
+  input="$(cat 2>/dev/null || true)"
+  dir="${CLAUDE_PROJECT_DIR:-}"
+  [ -n "$dir" ] || dir="$(json_get "$input" cwd)"
+  [ -n "$dir" ] || dir="$PWD"
+
+  if [ "$ev" = session-start ]; then
+    if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
+      printf 'export LANES_BIN="%s"\nexport PATH="%s:$PATH"\n' "$SELF" "$PLUGIN_ROOT/bin" >> "$CLAUDE_ENV_FILE"
+    fi
+    local mode="n/a" gate=""
+    if sd="$(state_dir "$dir")"; then
+      if [ -f "$sd/architect" ]; then mode=on; gate=" · gate: $(gate_state "$dir")"; else mode=off; fi
+    fi
+    printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"%s"}}\n' \
+      "$(json_escape "lanes plugin: \`lanes\` is on PATH (also \$LANES_BIN = $SELF). architect mode: $mode$gate. Delegate implementation with \`lanes run\`; see the lanes:routing skill.")"
+    exit 0
+  fi
+
+  sd="$(state_dir "$dir")" || exit 0
+  [ -f "$sd/architect" ] || exit 0
+
+  case "$ev" in
+    pre-edit)
+      printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"%s"}}\n' \
+        "$(json_escape "architect mode is on: the session does not edit files. Write a spec and run \`lanes run routine|escalate --effort <rung> - <<'EOF' … EOF\`. If a direct edit is genuinely required, ask the user to run /lanes:architect off.")"
+      ;;
+    bash)
+      # The reviewer is read-only by mechanism, not by promise.
+      local agent cmdline
+      agent="$(json_get "$input" agent_type)"; [ -n "$agent" ] || agent="$(json_get "$input" agent_name)"
+      case "$agent" in *reviewer*) ;; *) exit 0 ;; esac
+      cmdline="$(json_get "$input" command)"
+      if printf '%s' "$cmdline" | grep -qE '^[[:space:]]*(git[[:space:]]+(diff|status|log|show|blame|ls-files|rev-parse)\b|lanes[[:space:]]+(reviewed|status|tree-hash)\b|[^ ]*/lanes[[:space:]]+(reviewed|status|tree-hash)\b)' \
+         && ! printf '%s' "$cmdline" | grep -qE '(\||;|&&|>|`|\$\()'; then
+        exit 0
+      fi
+      printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"%s"}}\n' \
+        "$(json_escape "the reviewer is read-only: only git diff/status/log/show/blame/ls-files and \`lanes reviewed\` are allowed (no pipes or redirects). Read files with the Read tool.")"
+      ;;
+    stop)
+      [ "$(json_get "$input" stop_hook_active)" = true ] && exit 0
+      local gate
+      gate="$(gate_state "$dir")"
+      [ "$gate" = clear ] && exit 0
+      [ -z "$gate" ] && exit 0
+      local n="${gate#pending }" reason
+      reason="Review gate: $n file(s) changed since the last ship verdict. Before reporting done, run the lanes:reviewer agent on the current diff against the stated goal, act on its verdict, and let it record the ship verdict (lanes status shows the gate). If you are stopping only to ask the user something, say so briefly and stop again; the gate does not fire twice in a row."
+      printf '{"decision":"block","reason":"%s","hookSpecificOutput":{"hookEventName":"Stop","decision":"block","reason":"%s"}}\n' \
+        "$(json_escape "$reason")" "$(json_escape "$reason")"
+      ;;
+  esac
+  exit 0
+}
+
+# ------------------------------------------------------------------ main ----
+
+usage() {
+  cat <<U
+lanes $LANES_VERSION — deterministic implementation lanes for Claude Code
+
+  lanes run <routine|escalate> --effort <rung> [options] [SPEC|-]   delegate a spec to codex
+  lanes doctor                          check codex, config, models, timeout backend
+  lanes status                          mode, gate, resolved lanes
+  lanes mode on|off|status              architect mode: blocks Edit/Write, arms the review gate
+  lanes reviewed [--verdict ship|fix|rethink]   record a review verdict (the reviewer agent calls this)
+  lanes tree-hash                       content hash of the working tree
+  lanes spec-template                   print an empty spec
+  lanes run --help                      run options and exit codes
+U
+}
+
+main() {
+  local cmd="${1:-help}"; shift || true
+  case "$cmd" in
+    run)           cmd_run "$@" ;;
+    doctor)        cmd_doctor "$@" ;;
+    status)        cmd_status "$@" ;;
+    mode)          cmd_mode "$@" ;;
+    reviewed)      cmd_reviewed "$@" ;;
+    tree-hash)     tree_hash "${1:-.}"; say ;;
+    spec-template) spec_template ;;
+    hook)          cmd_hook "$@" ;;
+    version|--version|-V) say "lanes $LANES_VERSION" ;;
+    help|--help|-h) usage ;;
+    *) die "unknown command: $cmd (lanes help)" ;;
+  esac
+}
+
+main "$@"
