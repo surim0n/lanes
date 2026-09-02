@@ -1,6 +1,6 @@
 {
   "name": "lanes",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Architect mode for Claude Code: the session designs, specs and judges; Codex lanes do the typing at a chosen reasoning effort; a clean-context reviewer gates done. Enforced by hooks and one script, not by prompts.",
   "author": {
     "name": "Saurabh Suri",

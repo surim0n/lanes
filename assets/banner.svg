@@ -31,13 +31,13 @@
     <text x="514" y="278" font-size="15" fill="#8b93a7" letter-spacing="2">CODEX LANES</text>
     <text x="514" y="318" font-size="30" font-weight="600" fill="#f2f4f8">routine · escalate</text>
     <text x="514" y="352" font-size="18" fill="#aeb5c6">effort named per task</text>
-    <text x="514" y="380" font-size="18" fill="#4fb3a3">diff hashed · verify re-run</text>
+    <text x="514" y="380" font-size="18" fill="#4fb3a3">diff hashed · PROVE re-run</text>
 
     <!-- reviewer -->
     <rect x="892" y="236" width="300" height="168" rx="14" fill="#161a24" stroke="#2c3345" stroke-width="2"/>
     <text x="916" y="278" font-size="15" fill="#8b93a7" letter-spacing="2">CLEAN CONTEXT</text>
     <text x="916" y="318" font-size="30" font-weight="600" fill="#f2f4f8">reviewer</text>
-    <text x="916" y="352" font-size="18" fill="#aeb5c6">ship · fix · rethink</text>
+    <text x="916" y="352" font-size="18" fill="#aeb5c6">approve · revise · reject</text>
     <text x="916" y="380" font-size="18" fill="#e5533d">read-only (hook)</text>
 
     <!-- arrows -->
@@ -49,7 +49,7 @@
     <text x="806" y="304" font-size="14" fill="#8b93a7">report</text>
 
     <!-- gate -->
-    <text x="88" y="548" font-size="22" fill="#aeb5c6">Stop hook: no "done" until the tree has a ship verdict.</text>
+    <text x="88" y="548" font-size="22" fill="#aeb5c6">Stop hook: no "done" until the tree matches an approval.</text>
     <text x="88" y="586" font-size="18" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" fill="#6f788c">/plugin marketplace add surim0n/lanes</text>
   </g>
 </svg>

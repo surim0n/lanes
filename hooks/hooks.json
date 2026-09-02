@@ -1,5 +1,5 @@
 {
-  "description": "lanes: architect-mode edit guard, read-only reviewer, review gate on Stop, session context.",
+  "description": "lanes: architect-mode edit guard, read-only reviewer, verdict capture, review gate on Stop, session context.",
   "hooks": {
     "SessionStart": [
       {
@@ -19,6 +19,13 @@
         "matcher": "Bash",
         "hooks": [
           { "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/bin/lanes\" hook bash", "timeout": 10 }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/bin/lanes\" hook subagent-stop", "timeout": 15 }
         ]
       }
     ],

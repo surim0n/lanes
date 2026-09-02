@@ -1,72 +1,62 @@
 ---
 name: routing
-description: Routing doctrine for architect mode. Which lane and reasoning effort a task gets, the spec contract, running lanes in parallel or in worktrees, when to call the reviewer, and how the review gate behaves. Use when delegating implementation, writing a spec, choosing an effort, or before reporting a deliverable done.
+description: How the architect session hands implementation to Codex lanes, writes a spec, picks an effort, and gets the reviewer's approval before finishing. Use whenever code needs to be written or changed in architect mode.
 ---
 
-# Routing
+# Working in architect mode
 
-You are the architect. You design, decompose, write specs, route, and judge evidence. You do not type implementation code. In architect mode that is enforced: a hook blocks Edit and Write, and the Stop hook will not let a turn end with unreviewed changes.
+You design. Codex types. The reviewer signs off. Hooks hold you to it: Edit and Write are denied, and a turn cannot end while the tree differs from the last approved state.
 
-`lanes` is on PATH (SessionStart also exports `$LANES_BIN`). `lanes status` shows mode, gate and the resolved models.
+`lanes` is on PATH. `lanes status` shows mode, gate and models.
 
-## Lanes
+## Delegate
 
-| Lane | Route here when | Run |
-|---|---|---|
-| routine | The spec fully determines the outcome: wiring, CRUD, boilerplate, mechanical edits, features with no open design question. **Default.** | `lanes run routine --effort <rung> - <<'EOF' … EOF` |
-| escalate | Judgment the spec cannot carry decides the outcome: subtle concurrency, non-trivial algorithms, security-sensitive paths, hard debugging, wide-blast-radius refactors. Or routine has failed the same spec twice. | `lanes run escalate --effort <rung> - <<'EOF' … EOF` |
+One task, one spec, one run:
 
-Deciding rule: how much does the outcome depend on judgment the spec cannot capture? Little, route routine. A lot and mistakes are costly, route escalate, or keep that piece as a design decision you make yourself and spec the rest. A routine failure gets one corrected spec; a second failure on a corrected spec is evidence the task was misclassified, so escalate.
+```
+lanes run routine --effort medium - <<'SPEC'
+TASK:
+What to build and what finished looks like.
+FILES:
+src/limiter.ts (create)
+src/index.ts (modify)
+CONTRACT:
+export function limit(key: string, rps: number): Promise<boolean>
+RULES:
+No new dependencies. Don't touch the auth middleware.
+PROVE:
+npm test -- limiter
+SPEC
+```
+
+`lanes run` refuses a spec without TASK, FILES and PROVE, and refuses an effort the model doesn't have. The report says what changed, shows the PROVE command's real output, and exits with the status: 0 done, 1 PROVE failed, 2 nothing changed, 3 timeout, 4 codex unavailable, 5 bad spec or flags, 6 codex error.
+
+A spec you can't finish writing means the design isn't decided. Decide it, then delegate.
 
 ## Effort
 
-Pick the lowest rung that is adequate. Effort is cost and wall clock, not a quality dial to leave at max.
+`low` or `medium` for mechanical work. `high` for a feature with a few decisions left open. `xhigh` or `max` when the logic is genuinely hard. Name the smallest one that fits: it is time and money, not a quality knob.
 
-| Rung | Use for |
-|---|---|
-| low, medium | renames, wiring, config, tests that mirror an existing pattern |
-| high | ordinary features with a couple of decisions left to the lane |
-| xhigh | tricky logic, multi-file interactions, the retry after a spec correction |
-| max | the hardest single-lane work: concurrency, security paths, gnarly debugging |
-| ultra | escalate only: wide-blast-radius refactors, problems that resisted two attempts |
+## Escalate
 
-`lanes run` refuses a rung the lane's model does not have. That is a signal to escalate, not to round.
+`lanes run escalate` swaps in the heavier model, with `ultra` available. For the rare task where the spec can't pin down the answer, or after routine has missed twice on a corrected spec. Never the default.
 
-## Spec contract
+## Parallel and racing
 
-Lanes share none of your context. Every spec has five sections (`lanes spec-template` prints a blank one): OBJECTIVE, FILES, INTERFACES, CONSTRAINTS, VERIFY. `lanes run` rejects a spec missing OBJECTIVE, FILES or VERIFY. A spec you cannot finish writing is a decision you have not made yet: make it, then delegate.
+Independent specs: several `lanes run` calls in one message. Overlapping files, or a race between the two lanes on one spec: add `--worktree`; each returns a patch, and you `git apply --3way` the one you keep. Long runs go in the background.
 
-VERIFY must exercise the change. A test that does not touch the new code is evidence of nothing.
+## When a lane misses
 
-## Running lanes
+Fix the spec and rerun. Never patch the result by hand: the hook stops you, and it is the wrong fix anyway. Exit 2 means Codex declined; `final.md` in the artifacts says why.
 
-- Pass the spec on stdin with a quoted heredoc. Independent specs (no shared files, no ordering dependency) go out as parallel Bash calls in one message.
-- When parallel lanes might touch the same files, or when racing two lanes on one spec, add `--worktree`: each lane works in a throwaway worktree seeded with your current tree and returns a patch. Apply with `git apply --3way <patch>` in the order you choose.
-- Long runs (escalate at max or ultra) go in the background; keep working.
-- The exit code is the status: 0 complete, 1 verify failed, 2 empty diff (codex declined; `final.md` in the artifacts says why), 3 timeout, 4 codex unavailable, 5 your spec or flags are wrong, 6 codex error.
-- Read the report, not the log. The `verify:` block is a real re-run of the spec's command. Spot-check the diff yourself when the change matters.
-- A verify failure or an empty diff goes back to the lane as a corrected spec. You do not patch by hand.
+## Finish
 
-## Cost discipline
+Before you report done, call `lanes:reviewer` with the goal and the base ref. It reads `lanes reports` and the diff and answers `VERDICT: approve`, `revise` or `reject`. Approve clears the gate on its own. Revise: fix through a lane and call it again. Reject: take it to the user. Do not try to clear the gate yourself; `lanes approve` is denied to you and reserved for the human's terminal.
 
-- Emit judgment, not volume: specs, routing decisions, verdicts, short reports. A code block longer than an interface signature is a spec that has not been delegated yet.
-- Keep context lean: send broad exploration to a read-only Explore agent and keep the conclusions. Reference artifact paths instead of pasting logs or diffs.
-- Reason once: capture the design in the spec and let the lane carry it. Re-deriving decisions across turns spends the premium twice.
+## Stay cheap
 
-## The reviewer
+Specs and verdicts, not code. Explore with a read-only agent and keep only the conclusion. Point at artifact paths instead of pasting logs.
 
-`lanes:reviewer` runs Fable at high effort in a clean context, read-only by hook. Call it:
+## Broken setup
 
-- before committing to an architecture, a migration, an API shape or a refactor strategy;
-- when the same problem has resisted two distinct attempts;
-- always, once, at the end of a deliverable. Give it the goal and the base ref, not the diff; it pulls the diff itself.
-
-Act on the verdict or surface the disagreement to the user. Only the reviewer records `lanes reviewed`. Never run it yourself.
-
-## The gate
-
-While architect mode is on, the Stop hook blocks the end of a turn if the working tree changed since the last ship verdict. It fires once per stop: if you are stopping to ask the user a question, say so briefly and stop again. It fires again on the next turn until a ship verdict is recorded. `lanes status` shows whether the gate is clear or pending.
-
-## Degraded setups
-
-`lanes doctor` says what is missing. Without codex, turn architect mode off, do the typing yourself, and keep the reviewer. Without Fable on the account, change `model: fable` to `opus` in the reviewer agent.
+`lanes doctor`. No Codex: `lanes mode off` and type it yourself. No Fable on the account: set `model: opus` in the reviewer agent.

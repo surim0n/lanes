@@ -1,20 +1,19 @@
 #!/usr/bin/env bash
-# lanes — deterministic implementation lanes for Claude Code.
+# lanes — Fable writes the spec, Codex types it, a fresh reviewer signs off.
 #
 #   lanes run <routine|escalate> --effort <rung> [options] [SPEC|-]
-#   lanes doctor | status | mode on|off|status | reviewed [--verdict ship|fix|rethink]
-#   lanes tree-hash | spec-template | help
-#   lanes hook <pre-edit|bash|stop|session-start>      (called from hooks.json)
+#   lanes doctor | status | mode on|off|status | reports | approve | spec-template
+#   lanes hook <pre-edit|bash|stop|subagent-stop|session-start>   (from hooks.json)
 #
-# `run` exit codes: 0 complete · 1 verify failed · 2 empty diff · 3 timeout
+# `run` exit codes: 0 done · 1 PROVE failed · 2 nothing changed · 3 timeout
 #                   4 codex unavailable · 5 usage / spec error · 6 codex error
 set -euo pipefail
 
-LANES_VERSION="0.1.0"
+LANES_VERSION="0.2.0"
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 PLUGIN_ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
 
-EX_OK=0 EX_VERIFY=1 EX_EMPTY=2 EX_TIMEOUT=3 EX_UNAVAILABLE=4 EX_USAGE=5 EX_ERROR=6
+EX_OK=0 EX_PROVE=1 EX_EMPTY=2 EX_TIMEOUT=3 EX_UNAVAILABLE=4 EX_USAGE=5 EX_ERROR=6
 
 say()  { printf '%s\n' "$*"; }
 warn() { printf 'lanes: warning: %s\n' "$*" >&2; }
@@ -68,6 +67,18 @@ state_dir() {
   printf '%s' "$gd/lanes"
 }
 
+# record_verdict DIR VERDICT SOURCE — approve moves the gate; everything is logged.
+record_verdict() {
+  local sd h
+  sd="$(state_dir "$1")" || return 0
+  h="$(tree_hash "$1")"
+  printf '%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$h" "$2" "$3" >> "$sd/verdicts.log"
+  if [ "$2" = approve ]; then
+    printf '%s\n' "$h" > "$sd/approved"
+    : > "$sd/reports.log"
+  fi
+}
+
 # ---------------------------------------------------------------- timeout ----
 
 timeout_backend() {
@@ -93,14 +104,13 @@ run_timeout() {
 
 # ------------------------------------------------------------------ spec ----
 
-
-# spec_section FILE NAME — body of a section. Headers are a keyword at line
-# start, optionally prefixed with markdown #s, followed by ':' or end of line.
+# spec_section FILE NAME — body of a section. A header is the keyword at line
+# start, optionally after markdown #s, followed by ':' or end of line.
 spec_section() {
   awk -v want="$2" '
     {
       u = toupper($0)
-      if (match(u, /^[ \t]*(#+[ \t]*)?(OBJECTIVE|FILES|INTERFACES|CONSTRAINTS|VERIFY)[ \t]*(:|$)/)) {
+      if (match(u, /^[ \t]*(#+[ \t]*)?(TASK|FILES|CONTRACT|RULES|PROVE)[ \t]*(:|$)/)) {
         kw = substr(u, RSTART, RLENGTH); gsub(/[^A-Z]/, "", kw); cur = kw
         rest = substr($0, RSTART + RLENGTH); sub(/^[ \t]+/, "", rest); sub(/[ \t]+$/, "", rest)
         if (rest != "") body[cur] = body[cur] rest "\n"
@@ -116,20 +126,20 @@ nonblank() { printf '%s' "$1" | tr -d '[:space:]' | grep -q . ; }
 
 spec_template() {
   cat <<'TPL'
-OBJECTIVE:
-One paragraph. What to build or change, and what "done" looks like.
+TASK:
+What to build or change, and what finished looks like. One paragraph.
 
 FILES:
 path/to/file.ts        (modify)
 path/to/new-file.ts    (create)
 
-INTERFACES:
-Signatures, types, or API shapes the code must match. Exact.
+CONTRACT:
+Exact signatures, types, or API shapes the code must match.
 
-CONSTRAINTS:
-Project conventions. Things not to touch. Behaviour that must not change.
+RULES:
+Conventions to follow. Things not to touch. Behaviour that must not change.
 
-VERIFY:
+PROVE:
 npm test -- path/to/file
 TPL
 }
@@ -140,25 +150,25 @@ usage_run() {
   cat <<'U'
 usage: lanes run <routine|escalate> --effort <rung> [options] [SPEC|-]
 
-  SPEC            spec file (default: stdin). Sections: OBJECTIVE, FILES, INTERFACES,
-                  CONSTRAINTS, VERIFY. OBJECTIVE, FILES and VERIFY are required.
+  SPEC            spec file (default: stdin). Sections: TASK, FILES, CONTRACT, RULES,
+                  PROVE. TASK, FILES and PROVE are required. `lanes spec-template`.
   --effort, -e    reasoning effort; rungs come from lanes.conf (routine.efforts …)
   --model, -m     override the lane's model slug for this run
   --timeout, -t   wall clock for codex in seconds (lanes.conf <lane>.timeout)
-  --verify-timeout  wall clock for the VERIFY re-run (lanes.conf verify.timeout)
+  --prove-timeout wall clock for the PROVE re-run (lanes.conf prove.timeout)
   --worktree, -w  run in a throwaway git worktree; emit a patch instead of editing
-                  the working tree. Use for parallel lanes or racing two lanes.
+                  the working tree. For parallel lanes or racing two lanes.
   --network       let the sandbox reach the network (package installs)
   --keep-session  persist the codex session (default: --ephemeral)
   --dry-run       resolve everything, print the plan and the prompt path, run nothing
 
-exit: 0 complete · 1 verify failed · 2 empty diff · 3 timeout · 4 codex unavailable
+exit: 0 done · 1 PROVE failed · 2 nothing changed · 3 timeout · 4 codex unavailable
       5 usage/spec error · 6 codex error
 U
 }
 
 cmd_run() {
-  local lane="" effort="" model="" timeout="" vtimeout="" spec_src=""
+  local lane="" effort="" model="" timeout="" ptimeout="" spec_src=""
   local worktree=0 dry=0 network=0 keep=0
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -166,7 +176,7 @@ cmd_run() {
       --effort|-e)      effort="${2:-}"; shift ;;
       --model|-m)       model="${2:-}"; shift ;;
       --timeout|-t)     timeout="${2:-}"; shift ;;
-      --verify-timeout) vtimeout="${2:-}"; shift ;;
+      --prove-timeout)  ptimeout="${2:-}"; shift ;;
       --worktree|-w)    worktree=1 ;;
       --network)        network=1 ;;
       --keep-session)   keep=1 ;;
@@ -193,12 +203,12 @@ cmd_run() {
   [ -n "$model" ]    || die "no model configured for lane '$lane' (lanes.conf)"
   [ -n "$timeout" ]  || timeout="$(conf_get "$lane.timeout")"
   [ -n "$timeout" ]  || timeout=600
-  [ -n "$vtimeout" ] || vtimeout="$(conf_get verify.timeout)"
-  [ -n "$vtimeout" ] || vtimeout=600
+  [ -n "$ptimeout" ] || ptimeout="$(conf_get prove.timeout)"
+  [ -n "$ptimeout" ] || ptimeout=600
 
   # --- repo
   local root rel
-  root="$(git rev-parse --show-toplevel 2>/dev/null)" || die "lanes run needs a git repository (that is how it detects what the lane changed)"
+  root="$(git rev-parse --show-toplevel 2>/dev/null)" || die "lanes run needs a git repository (that is how it sees what the lane changed)"
   rel="$(git rev-parse --show-prefix)"
 
   # --- run dir + spec
@@ -214,15 +224,15 @@ cmd_run() {
     cp "$spec_src" "$spec"
   fi
   local s missing=""
-  for s in OBJECTIVE FILES VERIFY; do
+  for s in TASK FILES PROVE; do
     nonblank "$(spec_section "$spec" "$s")" || missing="$missing $s"
   done
-  [ -z "$missing" ] || die "spec is missing required section(s):$missing — a spec you can't finish is a decision you haven't made (lanes spec-template)"
-  for s in INTERFACES CONSTRAINTS; do
+  [ -z "$missing" ] || die "spec is missing required section(s):$missing — if you can't write it, the decision isn't made yet (lanes spec-template)"
+  for s in CONTRACT RULES; do
     nonblank "$(spec_section "$spec" "$s")" || warn "spec has no $s section"
   done
-  local verify_cmd
-  verify_cmd="$(spec_section "$spec" VERIFY)"
+  local prove_cmd
+  prove_cmd="$(spec_section "$spec" PROVE)"
 
   # --- prompt: the spec verbatim plus a fixed trailer
   local prompt="$rundir/prompt.md" final="$rundir/final.md" log="$rundir/codex.log"
@@ -232,10 +242,10 @@ cmd_run() {
 
 ---
 Lane instructions:
-- Make the changes described above. Touch only the files listed under FILES unless the objective cannot be met otherwise; if you must touch others, name them and say why in your final message.
+- Make the change described above. Stay within FILES unless the task cannot be done otherwise; if you must touch anything else, name it and say why in your final message.
 - Do not create commits. Leave the changes in the working tree.
-- When finished, run the VERIFY command exactly as written and include its complete output in your final message.
-- If the spec cannot be satisfied as written, make no changes and explain precisely what is missing or wrong.
+- When finished, run the PROVE command exactly as written and include its complete output in your final message.
+- If the spec cannot be satisfied as written, change nothing and explain precisely what is missing or wrong.
 TRAILER
   } > "$prompt"
 
@@ -246,9 +256,9 @@ TRAILER
   [ "$keep" = 1 ]    || cmd+=(--ephemeral)
 
   if [ "$dry" = 1 ]; then
-    say "DRY RUN · $lane · $model · effort $effort · timeout ${timeout}s · verify timeout ${vtimeout}s · worktree=$worktree"
+    say "DRY RUN · $lane · $model · effort $effort · timeout ${timeout}s · prove timeout ${ptimeout}s · worktree=$worktree"
     say "prompt: $prompt"
-    say "verify: $(printf '%s' "$verify_cmd" | head -n 3 | tr '\n' ' ')"
+    say "prove:  $(printf '%s' "$prove_cmd" | head -n 3 | tr '\n' ' ')"
     say "codex:  ${cmd[*]} --cd <work> - < $prompt"
     return 0
   fi
@@ -300,15 +310,15 @@ TRAILER
     stat="$(git -C "$tree_root" diff-tree -r --shortstat "$before" "$after" | sed -E 's/^[[:space:]]+//')"
   fi
   if [ -z "$status" ]; then
-    [ "$changed" = 1 ] || status=empty-diff
+    [ "$changed" = 1 ] || status=no-change
   fi
 
-  # --- re-run VERIFY ourselves; codex's word is not evidence
-  local vrc="" vlog="$rundir/verify.log"
+  # --- re-run PROVE ourselves; codex's word is not evidence
+  local prc="" plog="$rundir/prove.log"
   if [ -z "$status" ]; then
-    vrc=0
-    ( cd "$work" && run_timeout "$vtimeout" bash -c "$verify_cmd" ) > "$vlog" 2>&1 || vrc=$?
-    if [ "$vrc" = 0 ]; then status=complete; else status=verify-failed; fi
+    prc=0
+    ( cd "$work" && run_timeout "$ptimeout" bash -c "$prove_cmd" ) > "$plog" 2>&1 || prc=$?
+    if [ "$prc" = 0 ]; then status="done"; else status=prove-failed; fi
   fi
 
   # --- report
@@ -319,7 +329,7 @@ TRAILER
       timeout)     say "codex hit the ${timeout}s wall clock; whatever landed is listed below (log: $log)" ;;
       unavailable) say "codex could not run: $(tail -n 3 "$log" | tr '\n' ' ')" ;;
       error)       say "codex exited $rc (log: $log): $(tail -n 3 "$log" | tr '\n' ' ')" ;;
-      empty-diff)  say "codex exited 0 but changed nothing. Its final message usually says why:" ;;
+      no-change)   say "codex exited 0 but changed nothing. Its final message usually says why:" ;;
     esac
     if [ "$changed" = 1 ]; then
       say "changes ($stat):"
@@ -328,10 +338,10 @@ TRAILER
     else
       say "changes: none"
     fi
-    if [ -n "$vrc" ]; then
-      say "verify: exit $vrc · $(printf '%s' "$verify_cmd" | head -n 1)"
-      tail -n 12 "$vlog" | awk '{ print "    " substr($0, 1, 200) }'
-      [ "$vrc" = 124 ] && say "    (verify hit the ${vtimeout}s wall clock)"
+    if [ -n "$prc" ]; then
+      say "prove: exit $prc · $(printf '%s' "$prove_cmd" | head -n 1)"
+      tail -n 12 "$plog" | awk '{ print "    " substr($0, 1, 200) }'
+      [ "$prc" = 124 ] && say "    (PROVE hit the ${ptimeout}s wall clock)"
     fi
     if [ -s "$final" ]; then
       say "codex said (last lines; full text: $final):"
@@ -339,23 +349,29 @@ TRAILER
     fi
     say "artifacts: $rundir"
     case "$status" in
-      verify-failed) say "next: read $vlog; send the lane a corrected spec rather than patching by hand" ;;
-      empty-diff)    say "next: fix the spec (or the constraint it collided with) and rerun; do not implement it yourself" ;;
-      timeout)       say "next: split the task, or rerun with --timeout; escalate only if judgment was the problem" ;;
+      prove-failed) say "next: read $plog, correct the spec, rerun. Don't patch the result by hand." ;;
+      no-change)    say "next: fix whatever the spec collided with and rerun. Don't implement it yourself." ;;
+      timeout)      say "next: split the task or raise --timeout; escalate only if judgment was the problem." ;;
     esac
   } | tee "$report"
 
+  # the reviewer reads these through `lanes reports`
+  local sd
+  if sd="$(state_dir "$root" 2>/dev/null)"; then
+    { cat "$report"; say; } >> "$sd/reports.log"
+  fi
+
   case "$status" in
-    complete)      return "$EX_OK" ;;
-    verify-failed) return "$EX_VERIFY" ;;
-    empty-diff)    return "$EX_EMPTY" ;;
-    timeout)       return "$EX_TIMEOUT" ;;
-    unavailable)   return "$EX_UNAVAILABLE" ;;
-    *)             return "$EX_ERROR" ;;
+    "done")       return "$EX_OK" ;;
+    prove-failed) return "$EX_PROVE" ;;
+    no-change)    return "$EX_EMPTY" ;;
+    timeout)      return "$EX_TIMEOUT" ;;
+    unavailable)  return "$EX_UNAVAILABLE" ;;
+    *)            return "$EX_ERROR" ;;
   esac
 }
 
-# --------------------------------------------------------- mode / reviewed ----
+# ---------------------------------------------------- mode / approve / reports ----
 
 cmd_mode() {
   local sd
@@ -363,8 +379,9 @@ cmd_mode() {
   case "${1:-status}" in
     on)
       touch "$sd/architect"
-      tree_hash > "$sd/reviewed"
-      say "architect mode: on — Edit/Write are blocked, the review gate is armed (baseline: $(cut -c1-12 "$sd/reviewed"))" ;;
+      tree_hash > "$sd/approved"
+      : > "$sd/reports.log"
+      say "architect mode: on — Edit/Write are blocked, the review gate is armed (baseline: $(cut -c1-12 "$sd/approved"))" ;;
     off)
       rm -f "$sd/architect"
       say "architect mode: off" ;;
@@ -374,36 +391,28 @@ cmd_mode() {
   esac
 }
 
-cmd_reviewed() {
-  local verdict=ship sd h
-  while [ $# -gt 0 ]; do
-    case "$1" in
-      --verdict) verdict="${2:-}"; shift ;;
-      ship|fix|rethink) verdict="$1" ;;
-      *) die "usage: lanes reviewed [--verdict ship|fix|rethink]" ;;
-    esac
-    shift
-  done
-  case "$verdict" in ship|fix|rethink) ;; *) die "verdict must be ship, fix or rethink" ;; esac
+# Human override, for your own terminal. Claude's Bash is denied this by hook.
+cmd_approve() {
+  git rev-parse --show-toplevel >/dev/null 2>&1 || die "not a git repository"
+  record_verdict . approve human
+  say "approved: tree $(tree_hash | cut -c1-12) (gate clear)"
+}
+
+cmd_reports() {
+  local sd
   sd="$(state_dir)" || die "not a git repository"
-  h="$(tree_hash)"
-  printf '%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$h" "$verdict" >> "$sd/reviews.log"
-  if [ "$verdict" = ship ]; then
-    printf '%s\n' "$h" > "$sd/reviewed"
-    say "recorded: tree ${h:0:12} → ship (gate clear)"
-  else
-    say "recorded: tree ${h:0:12} → $verdict (gate stays armed until a ship verdict)"
-  fi
+  if [ -s "$sd/reports.log" ]; then cat "$sd/reports.log"
+  else say "no lane reports since the last approval"; fi
 }
 
 # ---------------------------------------------------------------- status ----
 
-gate_state() { # prints "clear" or "pending <n-files>"; empty if not applicable
+gate_state() { # "clear" or "pending <n-files>"; empty if not applicable
   local sd cur rev n
   sd="$(state_dir "${1:-.}")" || return 0
   [ -f "$sd/architect" ] || return 0
   cur="$(tree_hash "${1:-.}")"
-  rev="$(cat "$sd/reviewed" 2>/dev/null || true)"
+  rev="$(cat "$sd/approved" 2>/dev/null || true)"
   if [ "$cur" = "$rev" ]; then say clear; return 0; fi
   n="$(git -C "${1:-.}" diff-tree -r --name-only "$rev" "$cur" 2>/dev/null | wc -l | tr -d ' ' || true)"
   say "pending ${n:-?}"
@@ -419,11 +428,12 @@ cmd_status() {
     say "architect mode: $mode"
     if [ "$mode" = on ]; then
       gate="$(gate_state)"
-      last="$(tail -n 1 "$sd/reviews.log" 2>/dev/null | cut -f1,3 | tr '\t' ' ' || true)"
+      last="$(tail -n 1 "$sd/verdicts.log" 2>/dev/null | cut -f1,3,4 | tr '\t' ' ' || true)"
       case "$gate" in
-        clear)  say "gate: clear${last:+ (last verdict: $last)}" ;;
-        *)      say "gate: ${gate/pending /pending — } file(s) changed since the last ship verdict${last:+ (last verdict: $last)}" ;;
+        clear) say "gate: clear${last:+ (last verdict: $last)}" ;;
+        *)     say "gate: ${gate/pending /pending — } file(s) changed since the last approval${last:+ (last verdict: $last)}" ;;
       esac
+      say "reports since approval: $(grep -c '^LANE REPORT' "$sd/reports.log" 2>/dev/null || say 0)"
     fi
   else
     say "repo: not a git repository (architect mode and the gate need one)"
@@ -502,7 +512,7 @@ cmd_doctor() {
 
 # ----------------------------------------------------------------- hooks ----
 
-json_get() { # json key → string value (top-level or nested first match)
+json_get() { # json key → string value (first match at any depth)
   if command -v jq >/dev/null 2>&1; then
     printf '%s' "$1" | jq -r --arg k "$2" '.. | objects | select(has($k)) | .[$k] | tostring' 2>/dev/null | head -n 1
   else
@@ -510,49 +520,69 @@ json_get() { # json key → string value (top-level or nested first match)
   fi
 }
 json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' '; }
+deny() {
+  printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"%s"}}\n' "$(json_escape "$1")"
+}
 
 cmd_hook() {
   trap 'exit 0' ERR   # hooks fail open: a bug here must never block the user
-  local ev="${1:-}" input dir sd
+  local ev="${1:-}" input dir sd agent
   input="$(cat 2>/dev/null || true)"
   dir="${CLAUDE_PROJECT_DIR:-}"
   [ -n "$dir" ] || dir="$(json_get "$input" cwd)"
   [ -n "$dir" ] || dir="$PWD"
+  agent="$(json_get "$input" agent_type)"; [ -n "$agent" ] || agent="$(json_get "$input" agent_name)"
 
-  if [ "$ev" = session-start ]; then
-    if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
-      # shellcheck disable=SC2016  # literal \$PATH is intended
-      printf 'export LANES_BIN="%s"\nexport PATH="%s:$PATH"\n' "$SELF" "$PLUGIN_ROOT/bin" >> "$CLAUDE_ENV_FILE"
-    fi
-    local mode="n/a" gate=""
-    if sd="$(state_dir "$dir")"; then
-      if [ -f "$sd/architect" ]; then mode=on; gate=" · gate: $(gate_state "$dir")"; else mode=off; fi
-    fi
-    printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"%s"}}\n' \
-      "$(json_escape "lanes plugin: \`lanes\` is on PATH (also \$LANES_BIN = $SELF). architect mode: $mode$gate. Delegate implementation with \`lanes run\`; see the lanes:routing skill.")"
-    exit 0
-  fi
+  case "$ev" in
+    session-start)
+      if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
+        # shellcheck disable=SC2016  # literal $PATH is intended
+        printf 'export LANES_BIN="%s"\nexport PATH="%s:$PATH"\n' "$SELF" "$PLUGIN_ROOT/bin" >> "$CLAUDE_ENV_FILE"
+      fi
+      local mode="n/a" gate=""
+      if sd="$(state_dir "$dir")"; then
+        if [ -f "$sd/architect" ]; then mode=on; gate=" · gate: $(gate_state "$dir")"; else mode=off; fi
+      fi
+      printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"%s"}}\n' \
+        "$(json_escape "lanes plugin: \`lanes\` is on PATH (also \$LANES_BIN = $SELF). architect mode: $mode$gate. Delegate implementation with \`lanes run\`; see the lanes:routing skill.")"
+      exit 0 ;;
+
+    subagent-stop)
+      # The reviewer's own last words are the verdict. No shell call involved.
+      case "$agent" in *reviewer*) ;; *) exit 0 ;; esac
+      local tp verdict
+      tp="$(json_get "$input" transcript_path)"
+      [ -f "$tp" ] || exit 0
+      verdict="$(grep '"type":"assistant"' "$tp" | grep -oE 'VERDICT: *(approve|revise|reject)' | tail -n 1 | awk '{print $2}' || true)"
+      [ -n "$verdict" ] || exit 0
+      record_verdict "$dir" "$verdict" reviewer
+      exit 0 ;;
+  esac
 
   sd="$(state_dir "$dir")" || exit 0
   [ -f "$sd/architect" ] || exit 0
 
   case "$ev" in
     pre-edit)
-      printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"%s"}}\n' \
-        "$(json_escape "architect mode is on: the session does not edit files. Write a spec and run \`lanes run routine|escalate --effort <rung> - <<'EOF' … EOF\`. If a direct edit is genuinely required, ask the user to run /lanes:architect off.")"
+      deny "architect mode is on: the session does not edit files. Write a spec and run \`lanes run routine --effort <rung> - <<'EOF' … EOF\`. If a direct edit is genuinely required, ask the user to run /lanes:architect off."
       ;;
     bash)
-      # The reviewer is read-only by mechanism, not by promise.
-      local agent cmdline
-      agent="$(json_get "$input" agent_type)"; [ -n "$agent" ] || agent="$(json_get "$input" agent_name)"
-      case "$agent" in *reviewer*) ;; *) exit 0 ;; esac
+      local cmdline
       cmdline="$(json_get "$input" command)"
-      if printf '%s' "$cmdline" | grep -qE '^[[:space:]]*(git[[:space:]]+(diff|status|log|show|blame|ls-files|rev-parse)\b|lanes[[:space:]]+(reviewed|status|tree-hash)\b|[^ ]*/lanes[[:space:]]+(reviewed|status|tree-hash)\b)' \
-         && ! printf '%s' "$cmdline" | grep -qE '(\||;|&&|>|`|\$\()'; then
-        exit 0
-      fi
-      printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"%s"}}\n' \
-        "$(json_escape "the reviewer is read-only: only git diff/status/log/show/blame/ls-files and \`lanes reviewed\` are allowed (no pipes or redirects). Read files with the Read tool.")"
+      case "$agent" in
+        *reviewer*)
+          # The reviewer is read-only by mechanism, not by promise.
+          if printf '%s' "$cmdline" | grep -qE '^[[:space:]]*(git[[:space:]]+(diff|status|log|show|blame|ls-files|rev-parse)\b|([^ ]*/)?lanes[[:space:]]+(reports|status)\b)' \
+             && ! printf '%s' "$cmdline" | grep -qE '(\||;|&&|>|`|\$\()'; then
+            exit 0
+          fi
+          deny "the reviewer is read-only: only git diff/status/log/show/blame/ls-files, \`lanes reports\` and \`lanes status\` are allowed (no pipes or redirects). Read files with the Read tool." ;;
+        *)
+          # Only the reviewer's verdict or a human in a terminal clears the gate.
+          if printf '%s' "$cmdline" | grep -qE '(^|[^[:alnum:]_])lanes[[:space:]]+approve\b'; then
+            deny "\`lanes approve\` is for the human's terminal. The gate clears when the lanes:reviewer agent answers VERDICT: approve."
+          fi ;;
+      esac
       ;;
     stop)
       [ "$(json_get "$input" stop_hook_active)" = true ] && exit 0
@@ -561,7 +591,7 @@ cmd_hook() {
       [ "$gate" = clear ] && exit 0
       [ -z "$gate" ] && exit 0
       local n="${gate#pending }" reason
-      reason="Review gate: $n file(s) changed since the last ship verdict. Before reporting done, run the lanes:reviewer agent on the current diff against the stated goal, act on its verdict, and let it record the ship verdict (lanes status shows the gate). If you are stopping only to ask the user something, say so briefly and stop again; the gate does not fire twice in a row."
+      reason="Review gate: $n file(s) changed since the last approval. Before reporting done, run the lanes:reviewer agent with the goal and base ref; its VERDICT: approve clears the gate by itself. If you are stopping only to ask the user something, say so briefly and stop again; the gate does not fire twice in a row."
       printf '{"decision":"block","reason":"%s","hookSpecificOutput":{"hookEventName":"Stop","decision":"block","reason":"%s"}}\n' \
         "$(json_escape "$reason")" "$(json_escape "$reason")"
       ;;
@@ -573,16 +603,16 @@ cmd_hook() {
 
 usage() {
   cat <<U
-lanes $LANES_VERSION — deterministic implementation lanes for Claude Code
+lanes $LANES_VERSION — Fable writes the spec, Codex types it, a fresh reviewer signs off.
 
   lanes run <routine|escalate> --effort <rung> [options] [SPEC|-]   delegate a spec to codex
-  lanes doctor                          check codex, config, models, timeout backend
-  lanes status                          mode, gate, resolved lanes
-  lanes mode on|off|status              architect mode: blocks Edit/Write, arms the review gate
-  lanes reviewed [--verdict ship|fix|rethink]   record a review verdict (the reviewer agent calls this)
-  lanes tree-hash                       content hash of the working tree
-  lanes spec-template                   print an empty spec
-  lanes run --help                      run options and exit codes
+  lanes doctor                 codex, config, models, timeout backend
+  lanes status                 architect mode, gate, reports, resolved lanes
+  lanes mode on|off|status     architect mode: blocks Edit/Write, arms the review gate
+  lanes reports                every lane report since the last approval (the reviewer reads this)
+  lanes approve                human override from your own terminal; denied to Claude by hook
+  lanes spec-template          blank spec
+  lanes run --help             run options and exit codes
 U
 }
 
@@ -593,7 +623,8 @@ main() {
     doctor)        cmd_doctor "$@" ;;
     status)        cmd_status "$@" ;;
     mode)          cmd_mode "$@" ;;
-    reviewed)      cmd_reviewed "$@" ;;
+    approve)       cmd_approve "$@" ;;
+    reports)       cmd_reports "$@" ;;
     tree-hash)     tree_hash "${1:-.}"; say ;;
     spec-template) spec_template ;;
     hook)          cmd_hook "$@" ;;
