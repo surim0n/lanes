@@ -1,5 +1,7 @@
 # lanes
 
+![lanes: the session designs, Codex lanes type, a clean-context reviewer gates done](assets/banner.svg)
+
 **Architect mode for Claude Code.** Your session designs, writes specs and judges evidence. Codex lanes do the typing at the reasoning effort each task deserves. A clean-context reviewer decides when it's done. The rules are enforced by hooks and one script, not by asking the model nicely.
 
 ```
@@ -120,9 +122,10 @@ While architect mode is on, the Stop hook compares a content hash of the working
 ## Development
 
 ```
-tests/run.sh               96 tests against a fake codex; runs on bash 3.2 (macOS default) and 5
+tests/run.sh               98 tests against a fake codex; runs on bash 3.2 (macOS default) and 5
 tests/lint-frontmatter.sh  agents, commands and skill have frontmatter with a short description
 claude plugin validate .
+assets/render.sh           re-render assets/banner.png from banner.svg (headless Chrome)
 ```
 
 CI runs all three on macOS and Linux, plus shellcheck and a link check.
