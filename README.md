@@ -1,17 +1,17 @@
 # lanes
 
-![lanes: Fable orchestrates, Codex types, a fresh Fable reviews](assets/banner.svg)
+![lanes: Fable orchestrates GPT Luna, a fresh Fable reviews](assets/banner.svg)
 
-**Fable thinks. Codex types. A second Fable checks. Claude Code makes sure it stays that way.**
+**Fable thinks. GPT Luna types. A second Fable checks. Claude Code makes sure it stays that way.**
 
-Run your Claude Code session on Fable. Fable never writes code. It writes a short spec and hands it to Codex (GPT-5.6 Luna), which does the implementation. When Codex is done, the proof command from the spec is re-run for real. Then a fresh Fable reviewer, with no memory of the conversation, reads the diff and says approve, revise or reject. Until it says approve, the session can't call the job done.
+Run your Claude Code session on Fable. Fable never writes code. It writes a short spec and hands it to GPT-5.6 Luna, through the Codex CLI, which does the implementation. When GPT is done, the proof command from the spec is re-run for real. Then a fresh Fable reviewer, with no memory of the conversation, reads the diff and says approve, revise or reject. Until it says approve, the session can't call the job done.
 
 That's the whole idea. Hooks and one script make it hold; the prompts just explain it.
 
-Why split it this way: Fable's tokens go to thinking instead of typing, Codex is cheaper and from a different vendor, and the review comes from a context that didn't write the spec.
+Why split it this way: Fable's tokens go to thinking instead of typing, GPT is cheaper per token and from a different vendor, and the review comes from a context that didn't write the spec.
 
 ```
-you ──► Fable (orchestrates) ──► lanes run ──► Codex (implements)
+you ──► Fable (orchestrates) ──► lanes run ──► GPT Luna via Codex
                │                                    │
                │                     report: diff · proof re-run · exit code
                ▼

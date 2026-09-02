@@ -15,7 +15,7 @@
 
   <!-- wordmark -->
   <text x="88" y="118" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="72" font-weight="700" fill="#f2f4f8" letter-spacing="-2">lanes</text>
-  <text x="300" y="118" font-family="ui-sans-serif, -apple-system, Segoe UI, Helvetica, Arial, sans-serif" font-size="30" fill="#8b93a7">Fable orchestrates · Codex types · Fable reviews</text>
+  <text x="300" y="118" font-family="ui-sans-serif, -apple-system, Segoe UI, Helvetica, Arial, sans-serif" font-size="30" fill="#8b93a7">Fable orchestrates · GPT Luna types · Fable reviews</text>
 
   <!-- pipeline -->
   <g font-family="ui-sans-serif, -apple-system, Segoe UI, Helvetica, Arial, sans-serif">
@@ -28,7 +28,7 @@
 
     <!-- lanes -->
     <rect x="490" y="236" width="300" height="168" rx="14" fill="#161a24" stroke="#2c3345" stroke-width="2"/>
-    <text x="514" y="278" font-size="15" fill="#8b93a7" letter-spacing="2">CODEX LANES</text>
+    <text x="514" y="278" font-size="15" fill="#8b93a7" letter-spacing="2">GPT VIA CODEX</text>
     <text x="514" y="318" font-size="30" font-weight="600" fill="#f2f4f8">routine · escalate</text>
     <text x="514" y="352" font-size="18" fill="#aeb5c6">effort named per task</text>
     <text x="514" y="380" font-size="18" fill="#4fb3a3">diff hashed · PROVE re-run</text>
