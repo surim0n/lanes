@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # lanes test suite. Plain bash, no framework. Uses a fake codex on PATH (tests/bin/codex).
+# shellcheck disable=SC2015  # "test && ok || ko" is the intended pass/fail idiom here
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
@@ -71,7 +72,7 @@ t "  …sandbox workspace-write";       match "$(tr '\n' ' ' < "$FAKE_CODEX_ARGS
 t "  …ephemeral by default";          match "$(cat "$FAKE_CODEX_ARGS")" "^--ephemeral$"
 t "  …prompt carries spec + trailer"; ART="$(printf "%s" "$OUT" | sed -n "s/^artifacts: //p")"; OUT2="$(cat "$ART/prompt.md")"; match "$OUT2" "^OBJECTIVE: write hello"
 t "  …prompt carries the trailer";     match "$OUT2" "^Lane instructions:"
-t "  …patch artifact written";        [ -s "$(ls "$LANES_RUN_DIR"/*-routine-*/changes.patch | tail -n 1)" ] && ok || ko "no patch"
+t "  …patch artifact written";        [ -s "$ART/changes.patch" ] && ok || ko "no patch"
 t "--keep-session drops --ephemeral"; run "$d" routine --effort low --keep-session <<<"$SPEC"; nomatch "$(cat "$FAKE_CODEX_ARGS")" "^--ephemeral$"
 t "--network sets sandbox key";       run "$d" routine --effort low --network <<<"$SPEC"; match "$(cat "$FAKE_CODEX_ARGS")" "sandbox_workspace_write.network_access=true"
 

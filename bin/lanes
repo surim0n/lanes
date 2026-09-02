@@ -93,7 +93,6 @@ run_timeout() {
 
 # ------------------------------------------------------------------ spec ----
 
-SECTIONS="OBJECTIVE FILES INTERFACES CONSTRAINTS VERIFY"
 
 # spec_section FILE NAME — body of a section. Headers are a keyword at line
 # start, optionally prefixed with markdown #s, followed by ':' or end of line.
@@ -522,6 +521,7 @@ cmd_hook() {
 
   if [ "$ev" = session-start ]; then
     if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
+      # shellcheck disable=SC2016  # literal \$PATH is intended
       printf 'export LANES_BIN="%s"\nexport PATH="%s:$PATH"\n' "$SELF" "$PLUGIN_ROOT/bin" >> "$CLAUDE_ENV_FILE"
     fi
     local mode="n/a" gate=""
@@ -587,8 +587,8 @@ U
 }
 
 main() {
-  local cmd="${1:-help}"; shift || true
-  case "$cmd" in
+  local sub="${1:-help}"; shift || true
+  case "$sub" in
     run)           cmd_run "$@" ;;
     doctor)        cmd_doctor "$@" ;;
     status)        cmd_status "$@" ;;
@@ -599,7 +599,7 @@ main() {
     hook)          cmd_hook "$@" ;;
     version|--version|-V) say "lanes $LANES_VERSION" ;;
     help|--help|-h) usage ;;
-    *) die "unknown command: $cmd (lanes help)" ;;
+    *) die "unknown command: $sub (lanes help)" ;;
   esac
 }
 
