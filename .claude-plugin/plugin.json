@@ -1,7 +1,7 @@
 {
   "name": "lanes",
   "version": "0.2.0",
-  "description": "Architect mode for Claude Code: the session designs, specs and judges; Codex lanes do the typing at a chosen reasoning effort; a clean-context reviewer gates done. Enforced by hooks and one script, not by prompts.",
+  "description": "Fable orchestrates, Codex types, a fresh Fable reviews. Architect mode for Claude Code, enforced by hooks.",
   "author": {
     "name": "Saurabh Suri",
     "url": "https://github.com/surim0n"

@@ -5,14 +5,14 @@
     "url": "https://github.com/surim0n"
   },
   "metadata": {
-    "description": "Architect mode for Claude Code: Codex implementation lanes, a clean-context reviewer, and a hook-enforced review gate."
+    "description": "Fable orchestrates, Codex types, a fresh Fable reviews. Architect mode for Claude Code, enforced by hooks."
   },
   "plugins": [
     {
       "name": "lanes",
       "source": "./",
       "version": "0.2.0",
-      "description": "Architect mode for Claude Code: the session designs, specs and judges; Codex lanes do the typing at a chosen reasoning effort; a clean-context reviewer gates done."
+      "description": "Fable orchestrates, Codex types, a fresh Fable reviews. Architect mode for Claude Code, enforced by hooks."
     }
   ]
 }

@@ -15,7 +15,7 @@
 
   <!-- wordmark -->
   <text x="88" y="118" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="72" font-weight="700" fill="#f2f4f8" letter-spacing="-2">lanes</text>
-  <text x="300" y="118" font-family="ui-sans-serif, -apple-system, Segoe UI, Helvetica, Arial, sans-serif" font-size="30" fill="#8b93a7">architect mode for Claude Code</text>
+  <text x="300" y="118" font-family="ui-sans-serif, -apple-system, Segoe UI, Helvetica, Arial, sans-serif" font-size="30" fill="#8b93a7">Fable orchestrates · Codex types · Fable reviews</text>
 
   <!-- pipeline -->
   <g font-family="ui-sans-serif, -apple-system, Segoe UI, Helvetica, Arial, sans-serif">

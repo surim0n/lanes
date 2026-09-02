@@ -1,16 +1,22 @@
 # lanes
 
-![lanes: Claude writes the spec, Codex implements it, a fresh reviewer must approve](assets/banner.svg)
+![lanes: Fable orchestrates, Codex types, a fresh Fable reviews](assets/banner.svg)
 
-**Architect mode for Claude Code.** Claude turns your request into a concrete specification, Codex implements it at the reasoning level you name, the specified proof command is re-run independently, and a fresh read-only reviewer must approve the result before Claude can call the task done.
+**Fable thinks. Codex types. A second Fable checks. Claude Code makes sure it stays that way.**
+
+Run your Claude Code session on Fable. Fable never writes code. It writes a short spec and hands it to Codex (GPT-5.6 Luna), which does the implementation. When Codex is done, the proof command from the spec is re-run for real. Then a fresh Fable reviewer, with no memory of the conversation, reads the diff and says approve, revise or reject. Until it says approve, the session can't call the job done.
+
+That's the whole idea. Hooks and one script make it hold; the prompts just explain it.
+
+Why split it this way: Fable's tokens go to thinking instead of typing, Codex is cheaper and from a different vendor, and the review comes from a context that didn't write the spec.
 
 ```
-you ──► Claude (architect) ──► lanes run ──► Codex writes the code
-              │                                   │
-              │                    report: diff · PROVE re-run · exit code
-              ▼
-        lanes:reviewer (fresh context, read-only) ──► VERDICT: approve | revise | reject
-              │
+you ──► Fable (orchestrates) ──► lanes run ──► Codex (implements)
+               │                                    │
+               │                     report: diff · proof re-run · exit code
+               ▼
+        Fable reviewer (fresh context, read-only) ──► approve | revise | reject
+               │
         Stop hook: no "done" until the tree matches an approval
 ```
 
@@ -25,21 +31,19 @@ Needs `git` and the [Codex CLI](https://github.com/openai/codex) logged in (`npm
 
 ## Use
 
-1. Put the session on the model you want as architect: `/model fable` or `/model opus`.
-2. `/lanes:architect on`. Edit and Write are now blocked and the review gate is armed.
-3. Ask for work:
-
 ```
+/model fable
+/lanes:architect on
 Add rate limiting to the public API.
 ```
 
-Claude writes a spec, runs a lane, reads the report, and calls the reviewer before it can report done. `/lanes:status` shows mode, gate and models. `/lanes:architect off` when you want to edit by hand again.
+Fable writes the spec, runs a lane, reads the report, and calls the reviewer before it can report done. `/lanes:status` shows mode, gate and models. `/lanes:architect off` when you want to edit by hand again.
 
 ## What is enforced, what has a known hole, what is only asked
 
 | Rule | How |
 |---|---|
-| Claude never edits files | PreToolUse hook denies Edit, Write, MultiEdit, NotebookEdit |
+| Fable never edits files | PreToolUse hook denies Edit, Write, MultiEdit, NotebookEdit |
 | Every spec has a task, files and a proof command | `lanes run` refuses it otherwise (exit 5) |
 | An effort is named per task and never rounded | `--effort` is required; a rung the model lacks is refused |
 | "It worked" is not evidence | `lanes run` re-runs PROVE itself and shows the output (exit 1 on failure) |
@@ -53,10 +57,10 @@ Claude writes a spec, runs a lane, reads the report, and calls the reviewer befo
 Known holes, stated plainly:
 
 - The Stop gate yields on the immediate retry, so a session that needs to ask you something can. It fires again next turn.
-- Claude could prompt its own reviewer to rubber-stamp. The reviewer is told not to; that is a prompt, not a mechanism.
+- Fable could prompt its own reviewer to rubber-stamp. The reviewer is told not to; that is a prompt, not a mechanism.
 - Hooks don't police shell redirects. `cat > file` in Bash is only forbidden by the skill.
 
-Everything above is a workflow guardrail against a lazy or hurried session, not a security boundary against an adversarial one.
+This is a guardrail against a lazy or hurried session, not a security boundary against an adversarial one.
 
 ## The lanes
 
@@ -105,23 +109,16 @@ Exit codes for `run`: 0 done, 1 PROVE failed, 2 nothing changed, 3 timeout, 4 co
 
 The plugin's `bin/` is on the session's PATH. State lives in `.git/lanes/` of the checkout: nothing to commit, nothing to gitignore.
 
-## Degraded setups
+## If something is missing
 
-- No Fable on the account: change `model: fable` to `opus` in `agents/reviewer.md`.
+- No Fable on the account: change `model: fable` to `opus` in `agents/reviewer.md` and run the session on Opus.
 - No Codex: lanes exit 4. Turn architect mode off and keep the reviewer.
 - No `timeout` binary: `lanes` falls back to `gtimeout`, then `perl`, then warns and runs uncapped.
 - No `jq`: hooks parse with `sed`; `lanes doctor` skips the model cross-check.
 
 ## Development
 
-```
-tests/run.sh               tests against a fake codex; runs on bash 3.2 (macOS default) and 5
-tests/lint-frontmatter.sh  agents, commands and skill have frontmatter with a short description
-claude plugin validate .
-assets/render.sh           re-render assets/banner.png from banner.svg (headless Chrome)
-```
-
-CI runs all of it on macOS and Linux, plus shellcheck and a link check.
+`tests/run.sh` (fake Codex, bash 3.2 and 5), `tests/lint-frontmatter.sh`, `claude plugin validate .`, `assets/render.sh` for the banner. CI runs all of it on macOS and Linux with shellcheck and a link check.
 
 ## License
 
